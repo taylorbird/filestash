@@ -1,40 +1,70 @@
 # STEP1: CLONE THE CODE
-FROM alpine/git as builder_prepare
+FROM --platform=$BUILDPLATFORM alpine:latest as builder_prepare
 WORKDIR /home/
-ARG GIT_REPO=https://github.com/mickael-kerjean/filestash
-ARG GIT_BRANCH=master
-RUN git clone --depth 1 --single-branch --branch ${GIT_BRANCH} ${GIT_REPO}
+RUN apk add git && \
+    git clone --depth 1 https://github.com/mickael-kerjean/filestash
 
-# STEP2: BUILD FRONTEND
-FROM node:18-alpine AS builder_frontend
-WORKDIR /home/filestash/
-COPY --from=builder_prepare /home/filestash .
+# STEP2: BUILD THE FRONTEND
+FROM --platform=$BUILDPLATFORM node:18-alpine AS builder_frontend
+WORKDIR /home/
+COPY --from=builder_prepare /home/filestash/ ./
 RUN apk add make git gzip brotli && \
     npm install --legacy-peer-deps && \
     make build_frontend && \
     cd public && make compress
 
-# STEP3: BUILD BACKEND
-FROM golang:1.23-bookworm AS builder_backend
-WORKDIR /home/filestash/
-COPY --from=builder_frontend /home/filestash/ .
+# STEP3: BUILD THE BACKEND
+FROM --platform=$BUILDPLATFORM golang:1.20 AS builder_backend
+WORKDIR /home/
+COPY --from=builder_frontend /home/ ./
 RUN apt-get update > /dev/null && \
-    apt-get install -y curl make > /dev/null 2>&1 && \
-    apt-get install -y libjpeg-dev libtiff-dev libpng-dev libwebp-dev libraw-dev libheif-dev libgif-dev libvips-dev > /dev/null 2>&1 && \
+    apt-get install -y libvips-dev curl make > /dev/null 2>&1 && \
+    apt-get install -y libjpeg-dev libtiff-dev libpng-dev libwebp-dev libraw-dev libheif-dev libgif-dev && \
     make build_init && \
     make build_backend && \
     mkdir -p ./dist/data/state/config/ && \
     cp config/config.json ./dist/data/state/config/config.json
 
-# STEP4: BUILD PROD IMAGE
-FROM debian:stable-slim
-MAINTAINER mickael@kerjean.me
-WORKDIR /app/
-COPY --from=builder_backend /home/filestash/dist/ .
+# STEP4: Create the prod image from the build
+FROM --platform=$BUILDPLATFORM debian:stable-slim
+MAINTAINER root@gmail.com
+COPY --from=builder_backend /home/dist/ /app/
+WORKDIR "/app"
 RUN apt-get update > /dev/null && \
-    apt-get install -y --no-install-recommends apt-utils && \
-    apt-get install -y curl ffmpeg libjpeg-dev libtiff-dev libpng-dev libwebp-dev libraw-dev libheif-dev libgif-dev && \
-    useradd filestash && \
+    apt-get install -y --no-install-recommends apt-utils ca-certificates && \
+    apt-get install -y curl emacs-nox ffmpeg zip poppler-utils > /dev/null && \
+    update-ca-certificates && \
+    # org-mode: html export
+    curl https://raw.githubusercontent.com/mickael-kerjean/filestash/master/server/.assets/emacs/htmlize.el > /usr/share/emacs/site-lisp/htmlize.el && \
+    # org-mode: markdown export
+    curl https://raw.githubusercontent.com/mickael-kerjean/filestash/master/server/.assets/emacs/ox-gfm.el > /usr/share/emacs/site-lisp/ox-gfm.el && \
+    # org-mode: pdf export (with a light latex distribution)
+    cd && apt-get install -y wget perl > /dev/null && \
+    export CTAN_REPO="http://mirror.las.iastate.edu/tex-archive/systems/texlive/tlnet" && \
+    curl -sL "https://yihui.name/gh/tinytex/tools/install-unx.sh" | sh && \
+    mv ~/.TinyTeX /usr/share/tinytex && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install wasy && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install ulem && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install marvosym && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install wasysym && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install xcolor && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install listings && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install parskip && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install float && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install wrapfig && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install sectsty && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install capt-of && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install epstopdf-pkg && \
+    /usr/share/tinytex/bin/$(uname -m)-linux/tlmgr install cm-super && \
+    ln -s /usr/share/tinytex/bin/x86_64-linux/pdflatex /usr/local/bin/pdflatex && \
+    apt-get purge -y --auto-remove perl wget && \
+    # Cleanup
+    find /usr/share/ -name 'doc' | xargs rm -rf && \
+    find /usr/share/emacs -name '*.pbm' | xargs rm -f && \
+    find /usr/share/emacs -name '*.png' | xargs rm -f && \
+    find /usr/share/emacs -name '*.xpm' | xargs rm -f
+
+RUN useradd filestash && \
     chown -R filestash:filestash /app/ && \
     find /app/data/ -type d -exec chmod 770 {} \; && \
     find /app/data/ -type f -exec chmod 760 {} \; && \
