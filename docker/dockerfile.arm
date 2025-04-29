@@ -1,0 +1,48 @@
+# STEP1: CLONE THE CODE
+FROM --platform=$BUILDPLATFORM alpine:latest as builder_prepare
+WORKDIR /home/
+RUN apk add git && \
+    git clone --depth 1 https://github.com/mickael-kerjean/filestash
+
+# STEP2: BUILD THE FRONTEND
+FROM --platform=$BUILDPLATFORM node:18-alpine AS builder_frontend
+WORKDIR /home/
+COPY --from=builder_prepare /home/filestash/ ./
+RUN apk add make git gzip brotli && \
+    npm install --legacy-peer-deps && \
+    make build_frontend && \
+    cd public && make compress
+
+# STEP3: BUILD THE BACKEND
+FROM --platform=$BUILDPLATFORM golang:1.20 AS builder_backend
+WORKDIR /home/
+COPY --from=builder_frontend /home/ ./
+RUN apt-get update > /dev/null && \
+    apt-get install -y libvips-dev curl make > /dev/null 2>&1 && \
+    apt-get install -y libjpeg-dev libtiff-dev libpng-dev libwebp-dev libraw-dev libheif-dev libgif-dev && \
+    make build_init && \
+    make build_backend && \
+    mkdir -p ./dist/data/state/config/ && \
+    cp config/config.json ./dist/data/state/config/config.json
+
+# STEP4: Create the prod image from the build
+FROM --platform=$BUILDPLATFORM debian:stable-slim
+MAINTAINER root@gmail.com
+COPY --from=builder_backend /home/dist/ /app/
+WORKDIR "/app"
+RUN apt-get update > /dev/null && \
+    apt-get install -y --no-install-recommends apt-utils ca-certificates && \
+    apt-get install -y curl ffmpeg zip poppler-utils > /dev/null && \
+    update-ca-certificates && \
+    # Cleanup
+    rm -rf /var/lib/apt/lists/* /tmp/*
+
+RUN useradd filestash && \
+    chown -R filestash:filestash /app/ && \
+    find /app/data/ -type d -exec chmod 770 {} \; && \
+    find /app/data/ -type f -exec chmod 760 {} \; && \
+    chmod 730 /app/filestash
+
+USER filestash
+CMD ["/app/filestash"]
+EXPOSE 8334
